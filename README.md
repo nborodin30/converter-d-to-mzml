@@ -5,21 +5,21 @@ Lightweight watcher that detects completed timsTOF `.d` folders and converts the
 ## Requirements
 
 - Python 3.9+
-- Docker installed and available on `PATH`
-- `tdf2mzml.py` installed and available on `PATH` (or use the Docker image `mfreitas/tdf2mzml`)
+- Docker installed
+- `tdf2mzml.py` installed  (or use the Docker image `mfreitas/tdf2mzml`)
 
 ## Usage
 
 Run in the directory you want to watch:
 
 ```
-./watch_and_convert.py
+python ./watch_and_convert.py
 ```
 
 Or specify a directory:
 
 ```
-./watch_and_convert.py --dir /path/to/watch
+python ./watch_and_convert.py --dir /path/to/watch
 ```
 
 ## Options
