@@ -1,6 +1,6 @@
 # watch_and_convert
 
-Lightweight watcher that detects completed TIMS `.d` folders and converts them to mzML via `tdf2mzml.py` or Docker.
+Lightweight watcher that detects completed timsTOF `.d` folders and converts them to mzML via `tdf2mzml.py` or Docker.
 
 ## Requirements
 
