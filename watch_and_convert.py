@@ -7,7 +7,7 @@ Detection strategy:
 - Consider a directory "complete" when its total size is stable across N checks.
 
 Conversion strategy:
-- Prefer a local `tdf2mzml.py` on PATH if available.
+- use a local `tdf2mzml.py` if available.
 - Otherwise attempt a Docker fallback using `mfreitas/tdf2mzml` image.
 
 Usage: run in the directory to watch, or pass `--dir`.
@@ -36,7 +36,7 @@ def dir_size(path: str) -> int:
                 pass
     return total
 
-def has_required_files(path: str) -> bool:
+def has_required_files(path: str, size_check_seconds: int = 1) -> bool:
     """Return True if the directory contains expected TDF files.
 
     Heuristic: look for `analysis.tdf` or `analysis.tdf_bin`. As a conservative
@@ -48,10 +48,24 @@ def has_required_files(path: str) -> bool:
         if os.path.exists(os.path.join(path, c)):
             return True
 
+    # Optional quick size-stability check (1s by default)
+    if size_check_seconds and size_check_seconds > 0:
+        try:
+            first_size = dir_size(path)
+            time.sleep(size_check_seconds)
+            second_size = dir_size(path)
+            logging.debug("Quick size check for %s: %d -> %d", path, first_size, second_size)
+            if first_size == second_size and first_size > 0:
+                logging.info("Quick size-stability check passed for %s", path)
+                return True
+        except Exception:
+            logging.exception("Quick size-stability check failed for %s", path)
+
     # Fallback: any regular file inside the directory
     try:
         for entry in os.listdir(path):
             if os.path.isfile(os.path.join(path, entry)):
+                logging.debug("Found regular file in %s; treating as ready", path)
                 return True
     except OSError:
         return False
