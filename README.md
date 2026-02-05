@@ -43,4 +43,4 @@ Two options:
 
 1) **Docker (recommended)**: no local install needed. The script runs `tdf2mzml.py` inside the `mfreitas/tdf2mzml` image.
 2) **Local install**: obtain `tdf2mzml.py` from the official tdf2mzml source and place it on your `PATH` (for example, a `bin/` directory already on `PATH`).
-- Official source: https://github.com/Bruker-EAS/tdf2mzml
+- Official source: https://github.com/mafreitas/tdf2mzml
