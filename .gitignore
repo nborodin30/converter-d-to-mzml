@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+conversion.log
+*.log
+
+# Raw data / outputs
+*.mzML
+*.mzml
+*.d/
+
+# OS
+.DS_Store
+Thumbs.db
