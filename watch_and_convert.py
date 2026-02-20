@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Watch current directory for fully-copied .d folders and convert to mzML.
-
-Detection strategy:
-- Look for directories ending with `.d` in the watch directory.
-- Ensure required files exist (e.g., `analysis.tdf` or `analysis.tdf_bin`).
-- Consider a directory "complete" when its total size is stable across N checks.
-
-Conversion strategy:
-- use a local `tdf2mzml.py` if available.
-- Otherwise attempt a Docker fallback using `mfreitas/tdf2mzml` image.
-
-Usage: run in the directory to watch, or pass `--dir`.
+"""Watch for fully-copied `.d` folders and convert them to mzML.
 """
 
 from __future__ import annotations
@@ -94,15 +83,30 @@ def run_conversion(path: str, out_dir: str, docker_image: str = "mfreitas/tdf2mz
         return 2, ""
 
     base_name = os.path.basename(os.path.normpath(path))
-    # strip trailing .d from directory name for output filename
     root, ext = os.path.splitext(base_name)
     if ext.lower() == ".d":
         base_name = root
     out_name = os.path.join(out_dir, base_name + ".mzML")
 
     if os.path.exists(out_name):
-        logging.info("Skipping conversion; output exists: %s", out_name)
-        return 0, out_name
+        # If the existing output is a valid mzML, skip. Otherwise remove and re-run.
+        try:
+            if is_valid_mzml(out_name):
+                logging.info("Skipping conversion; valid output exists: %s", out_name)
+                return 0, out_name
+            else:
+                if dry_run:
+                    logging.info("[dry-run] Would overwrite invalid output: %s", out_name)
+                    return 0, out_name
+                logging.warning("Removing existing invalid mzML before re-running: %s", out_name)
+                try:
+                    os.remove(out_name)
+                except OSError:
+                    logging.exception("Failed to remove invalid mzML: %s", out_name)
+                    return 2, out_name
+        except Exception:
+            logging.exception("Error while checking existing mzML %s", out_name)
+            return 2, out_name
 
     if dry_run:
         logging.info("[dry-run] Would convert %s -> %s using Docker image %s", path, out_name, docker_image)
@@ -137,8 +141,63 @@ def run_conversion(path: str, out_dir: str, docker_image: str = "mfreitas/tdf2mz
             logging.exception("Error reading subprocess output for %s", path)
         rc = proc.wait()
     logging.info("Docker exited with rc=%s", rc)
-    # return rc and the expected output path on the host
     return rc, out_name
+
+
+def is_valid_mzml(path: str, validate_interval: int = 1) -> bool:
+    """Quickly validate an mzML file by checking existence, size, XML tag and stability.
+
+    Returns True if the file exists, non-zero, contains an mzML XML tag near
+    the start, and its size is stable across `validate_interval` seconds.
+    """
+    try:
+        if not os.path.exists(path):
+            return False
+        size1 = os.path.getsize(path)
+        if size1 == 0:
+            logging.debug("mzML exists but is empty: %s", path)
+            return False
+
+        # Check for mzML XML tag in the first chunk and closing tag near the end
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(4096)
+                if b"<mzML" not in head and b"<?xml" not in head:
+                    logging.debug("mzML header missing in %s", path)
+                    return False
+
+                # check tail for closing tag to detect incomplete writes
+                try:
+                    # seek to near the end (last 8k) and read
+                    fh.seek(0, os.SEEK_END)
+                    tail_bytes = min(8192, fh.tell())
+                    fh.seek(-tail_bytes, os.SEEK_END)
+                    tail = fh.read(tail_bytes)
+                    if b"</mzML>" not in tail:
+                        logging.debug("mzML closing tag missing in %s", path)
+                        return False
+                except OSError:
+                    # some filesystems may not support negative seek; fall back to a small read
+                    fh.seek(0)
+                    whole = fh.read()
+                    if b"</mzML>" not in whole:
+                        logging.debug("mzML closing tag missing in %s (fallback)", path)
+                        return False
+        except Exception:
+            logging.exception("Failed to read mzML header/tail for %s", path)
+            return False
+
+        if validate_interval and validate_interval > 0:
+            time.sleep(validate_interval)
+            size2 = os.path.getsize(path)
+            if size1 != size2:
+                logging.debug("mzML size changed %d -> %d for %s", size1, size2, path)
+                return False
+
+        return True
+    except Exception:
+        logging.exception("Error validating mzML %s", path)
+        return False
 
 
 def expected_output_for_dir(dirpath: str, out_dir: str) -> str:
@@ -156,6 +215,8 @@ def watch_directory(
     out_dir: str | None = None,
     dry_run: bool = False,
     docker_image: str = "mfreitas/tdf2mzml",
+    max_retries: int = 3,
+    validate_interval: int = 1,
 ):
     out_dir = out_dir or watch_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -168,12 +229,20 @@ def watch_directory(
     all_dirs = [d for d in os.listdir(watch_dir) if d.endswith(".d") and os.path.isdir(os.path.join(watch_dir, d))]
     pending = []
     done = []
+    attempts: Dict[str, int] = {}
     for d in all_dirs:
         p = os.path.join(watch_dir, d)
         expected = expected_output_for_dir(p, out_dir)
         # consider directory done if expected mzML exists; otherwise if it has data, it's pending
         if os.path.exists(expected):
-            done.append(d)
+            # validate that the existing mzML is actually complete
+            if is_valid_mzml(expected, validate_interval=validate_interval):
+                done.append(d)
+            else:
+                logging.warning("Existing mzML looks incomplete: %s", expected)
+                # consider it pending so we can re-run conversion
+                pending.append(d)
+                attempts[p] = attempts.get(p, 0)
         elif has_required_files(p):
             pending.append(d)
 
@@ -192,7 +261,7 @@ def watch_directory(
         for d in all_dirs:
             p = os.path.join(watch_dir, d)
             expected = expected_output_for_dir(p, out_dir)
-            if os.path.exists(expected):
+            if os.path.exists(expected) and is_valid_mzml(expected, validate_interval=validate_interval):
                 done_count += 1
         in_progress_count = len(known_processing)
 
@@ -201,8 +270,17 @@ def watch_directory(
         for d in all_dirs:
             p = os.path.join(watch_dir, d)
             expected = expected_output_for_dir(p, out_dir)
+            # If output exists but invalid and retries remain, treat as candidate
             if os.path.exists(expected):
-                continue
+                if not is_valid_mzml(expected, validate_interval=validate_interval):
+                    att = attempts.get(p, 0)
+                    if att >= max_retries:
+                        logging.error("mzML exists but invalid and max retries reached for %s", p)
+                        continue
+                    logging.info("mzML exists but invalid; scheduling re-run for %s (attempt %d/%d)", p, att + 1, max_retries)
+                    # allow to be added to candidates
+                else:
+                    continue
             if p in known_processing:
                 continue
             if has_required_files(p):
@@ -239,21 +317,26 @@ def watch_directory(
                 except Exception:
                     logging.exception("Conversion raised exception for %s", full)
                     rc, expected_out = 99, ""
-
-                if rc == 0:
-                    if expected_out and os.path.exists(expected_out):
-                        logging.info("Conversion succeeded for %s; output: %s", full, expected_out)
-                    else:
-                        logging.error("Conversion reported rc=0 but output missing for %s (expected %s)", full, expected_out)
-                        # treat as failure so it can be retried
-                        known_processing.discard(full)
-                        sizes.pop(full, None)
-                        
+                # Validate result
+                if rc == 0 and expected_out and os.path.exists(expected_out) and is_valid_mzml(expected_out, validate_interval=validate_interval):
+                    logging.info("Conversion succeeded for %s; output: %s", full, expected_out)
+                    # cleanup tracking
+                    sizes.pop(full, None)
+                    attempts.pop(full, None)
                 else:
-                    logging.error("Conversion failed (rc=%s) for %s", rc, full)
-                    # allow re-try later
+                    # increment attempt counter and allow retry unless exhausted
+                    att = attempts.get(full, 0) + 1
+                    attempts[full] = att
+                    if rc == 0:
+                        logging.error("Conversion reported rc=0 but output missing/invalid for %s (expected %s)", full, expected_out)
+                    else:
+                        logging.error("Conversion failed (rc=%s) for %s", rc, full)
+
                     known_processing.discard(full)
                     sizes.pop(full, None)
+                    if att >= max_retries:
+                        logging.error("Max retries reached (%d) for %s; giving up", max_retries, full)
+                        attempts.pop(full, None)
 
         time.sleep(poll_interval)
 
@@ -268,6 +351,8 @@ def parse_args():
     p.add_argument("--log-file", default=None, help="Path to logfile (appends). If omitted, logs go to stderr")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     p.add_argument("--dry-run", action="store_true", help="Don't run conversion, only report candidates")
+    p.add_argument("--max-retries", type=int, default=3, help="Maximum conversion retries for a single dataset")
+    p.add_argument("--validate-interval", type=int, default=1, help="Seconds to wait when validating mzML stability")
     return p.parse_args()
 
 
@@ -288,6 +373,8 @@ def main():
             out_dir=args.out,
             dry_run=args.dry_run,
             docker_image=args.docker_image,
+            max_retries=args.max_retries,
+            validate_interval=args.validate_interval,
         )
     except KeyboardInterrupt:
         logging.info("Exiting on user interrupt")
