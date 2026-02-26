@@ -14,7 +14,33 @@ Convert Bruker timsTOF `.d` folders to mzML format using Docker.
 
 - Python 3.9+
 - Docker installed and running
-- Streamlit (`pip install streamlit`)
+- Dependencies in `requirements.txt` (install via `pip install -r requirements.txt`)
+
+## Quick Start
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/nborodin30/converter-d-to-mzml.git
+   cd converter-d-to-mzml
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Make sure Docker is running** (start Docker Desktop)
+
+4. **Launch the GUI**:
+   ```bash
+   streamlit run app.py
+   ```
+
+5. **In the browser**:
+   - Navigate to your source directory containing `.d` folders
+   - Select datasets to convert
+   - Click "Start Conversion"
+   - Monitor progress and logs in real-time
 
 ## GUI Usage
 
