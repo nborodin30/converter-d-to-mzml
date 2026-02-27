@@ -73,10 +73,12 @@ python ./watch_and_convert.py --dir /path/to/watch
 
 ### CLI Options
 
+- `--dir`: Directory to watch (default: current directory)
 - `--poll-interval`: Seconds between scans (default: 30)
 - `--stability-checks`: Number of identical-size checks before triggering conversion (default: 2)
 - `--out`: Output directory for mzML files (defaults to watch dir)
 - `--docker-image`: Docker image to use (default: `mfreitas/tdf2mzml`)
+- `--validate-interval`: Seconds to wait before validating mzML output (default: 0)
 - `--log-file`: Log file path (default: `<watch_dir>/conversion.log`)
 - `--log-level`: Logging level (`DEBUG|INFO|WARNING|ERROR|CRITICAL`)
 

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -205,7 +206,7 @@ def is_docker_running() -> tuple[bool, str]:
 # Conversion worker
 # ─────────────────────────────────────────────────────────────────────────────
 def start_conversion(
-    selected: list[str], src: str, out: str, docker_image: str, validate_interval: int
+    selected: list[str], src: str, out: str, docker_image: str
 ):
     bg_control["stop"] = False  # Reset stop flag
     
@@ -291,7 +292,7 @@ def start_conversion(
                     bg_logs.append(f"❌ Exception: {e}")
                 log_to_file(f"❌ Exception: {e}")
 
-            ok = rc == 0 and out_file and os.path.exists(out_file) and is_valid_mzml(out_file, validate_interval=validate_interval)
+            ok = rc == 0 and out_file and os.path.exists(out_file) and is_valid_mzml(out_file, validate_interval=1)
 
             with bg_lock:
                 if ok:
@@ -439,11 +440,7 @@ with st.expander("⚙️ Settings", expanded=True):
         st.caption(f"📂 {st.session_state.out_dir}")
 
     st.divider()
-    opt_col1, opt_col2 = st.columns(2)
-    with opt_col1:
-        docker_image = st.text_input("Docker image", value="mfreitas/tdf2mzml")
-    with opt_col2:
-        validate_interval = st.number_input("Validate interval (s)", min_value=0, value=1)
+    docker_image = st.text_input("Docker image", value="mfreitas/tdf2mzml")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,7 +454,7 @@ if not ds:
     st.warning("No `.d` folders found in the source directory.")
 else:
     # Selection buttons (grouped together)
-    btn_cols = st.columns([1, 1, 1.2, 4])
+    btn_cols = st.columns([1, 1, 5])
     with btn_cols[0]:
         if st.button("☑️ Select All", use_container_width=True):
             for name in ds:
@@ -467,12 +464,6 @@ else:
         if st.button("☐ Clear All", use_container_width=True):
             for name in ds:
                 st.session_state[f"chk_{name}"] = False
-            st.rerun()
-    with btn_cols[2]:
-        if st.button("🔍 Select Incomplete", use_container_width=True):
-            for name in ds:
-                mzml_code, _ = get_mzml_status(name, st.session_state.out_dir, validate_interval)
-                st.session_state[f"chk_{name}"] = (mzml_code != "valid")
             st.rerun()
 
     st.divider()
@@ -494,7 +485,7 @@ else:
         # Status row below the name
         _, col_mzml, col_status, col_progress = st.columns([0.05, 1.5, 1, 2])
         with col_mzml:
-            mzml_code, mzml_text = get_mzml_status(name, st.session_state.out_dir, validate_interval)
+            mzml_code, mzml_text = get_mzml_status(name, st.session_state.out_dir)
             st.caption(mzml_text)
         with col_status:
             status = st.session_state.statuses.get(name)
@@ -561,7 +552,6 @@ with action_col1:
                 st.session_state.src_dir,
                 st.session_state.out_dir,
                 docker_image,
-                validate_interval,
             )
             st.rerun()
 

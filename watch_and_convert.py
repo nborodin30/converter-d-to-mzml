@@ -268,6 +268,7 @@ def watch_directory(
     out_dir: str | None = None,
     dry_run: bool = False,
     docker_image: str = "mfreitas/tdf2mzml",
+    validate_interval: int = 0,
 ):
     out_dir = out_dir or watch_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -286,7 +287,7 @@ def watch_directory(
         expected = expected_output_for_dir(p, out_dir)
         # consider directory done only if expected mzML exists AND is valid
         if os.path.exists(expected):
-            if is_valid_mzml(expected, validate_interval=0):  # quick check, no sleep
+            if is_valid_mzml(expected, validate_interval=validate_interval):
                 done.append(d)
             else:
                 incomplete.append(d)
@@ -309,7 +310,7 @@ def watch_directory(
         for d in all_dirs:
             p = os.path.join(watch_dir, d)
             expected = expected_output_for_dir(p, out_dir)
-            if os.path.exists(expected) and is_valid_mzml(expected, validate_interval=0):
+            if os.path.exists(expected) and is_valid_mzml(expected, validate_interval=validate_interval):
                 done_count += 1
         in_progress_count = len(known_processing)
 
@@ -319,7 +320,7 @@ def watch_directory(
             p = os.path.join(watch_dir, d)
             expected = expected_output_for_dir(p, out_dir)
             # Only skip if mzML exists AND is valid
-            if os.path.exists(expected) and is_valid_mzml(expected, validate_interval=0):
+            if os.path.exists(expected) and is_valid_mzml(expected, validate_interval=validate_interval):
                 continue
             if p in known_processing:
                 continue
@@ -386,6 +387,7 @@ def parse_args():
     p.add_argument("--log-file", default=None, help="Path to logfile (appends). If omitted, logs go to stderr")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     p.add_argument("--dry-run", action="store_true", help="Don't run conversion, only report candidates")
+    p.add_argument("--validate-interval", type=int, default=0, help="Seconds to wait before validating mzML output (default: 0)")
     return p.parse_args()
 
 
@@ -406,6 +408,7 @@ def main():
             out_dir=args.out,
             dry_run=args.dry_run,
             docker_image=args.docker_image,
+            validate_interval=args.validate_interval,
         )
     except KeyboardInterrupt:
         logging.info("Exiting on user interrupt")
