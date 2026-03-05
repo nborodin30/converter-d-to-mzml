@@ -42,7 +42,6 @@ def dir_size(path: str) -> int:
                 pass
     return total
 
-
 def has_required_files(path: str, size_check_seconds: int = 1) -> bool:
     """Return True if the directory contains expected TDF files.
 
@@ -81,14 +80,14 @@ def has_required_files(path: str, size_check_seconds: int = 1) -> bool:
 
 
 def is_valid_mzml(path: str, validate_interval: int = 1) -> bool:
-    """Check if an mzML file is complete by verifying it ends with </mzML>.
+    """Check if an mzML file is complete by verifying it ends with </mzML> or </indexedmzML>.
     
     Args:
         path: Path to the mzML file
         validate_interval: Optional wait time to ensure file is not being written
         
     Returns:
-        True if the file exists and contains the closing </mzML> tag
+        True if the file exists and contains a valid closing tag
     """
     if not os.path.exists(path):
         return False
@@ -105,7 +104,8 @@ def is_valid_mzml(path: str, validate_interval: int = 1) -> bool:
             f.seek(-read_size, 2)
             tail = f.read().decode("utf-8", errors="ignore")
         
-        return "</mzML>" in tail
+        # Check for both regular mzML and indexed mzML formats
+        return "</mzML>" in tail or "</indexedmzML>" in tail
     except Exception as e:
         logging.warning("Failed to validate mzML %s: %s", path, e)
         return False

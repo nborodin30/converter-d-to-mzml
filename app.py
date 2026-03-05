@@ -280,9 +280,9 @@ def start_conversion(
                     log_to_file(msg)
                 continue
             
-            # Calculate expected mzML size (~62,5% of .d folder size)
+            # Calculate expected mzML size (~87% of .d folder size)
             d_size = dir_size(full)
-            expected_mzml_size = int(d_size * 0.625)
+            expected_mzml_size = int(d_size * 0.87)
             
             # Determine output file path
             base_name = name[:-2] if name.endswith(".d") else name
@@ -358,7 +358,7 @@ def start_conversion(
                         log_to_file(f"   ⚠️ Debug: file not found at {out_file}")
                     elif not file_valid:
                         file_size = get_file_size(out_file) if file_exists else 0
-                        bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing </mzML> tag)")
+                        bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing closing tag)")
                         log_to_file(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation")
             
             ok = rc == 0 and file_exists and file_valid
@@ -565,7 +565,7 @@ else:
                 mzml_path = os.path.join(st.session_state.out_dir, base_name + ".mzML")
                 
                 d_size = dir_size(d_folder_path)
-                expected_size = d_size * 0.625  # mzML is typically ~62% of .d size
+                expected_size = d_size * 0.87  # mzML is typically ~87% of .d size
                 current_size = get_file_size(mzml_path)
                 
                 if expected_size > 0:
