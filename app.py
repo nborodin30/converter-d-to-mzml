@@ -340,7 +340,28 @@ def start_conversion(
                     bg_logs.append(f"❌ Exception: {e}")
                 log_to_file(f"❌ Exception: {e}")
 
-            ok = rc == 0 and out_file and os.path.exists(out_file) and is_valid_mzml(out_file, validate_interval=1)
+            # Wait a bit for filesystem to sync after Docker exits
+            time.sleep(2)
+            
+            # Check each condition separately for debugging
+            file_exists = out_file and os.path.exists(out_file)
+            file_valid = file_exists and is_valid_mzml(out_file, validate_interval=2)
+            
+            # Log detailed status
+            with bg_lock:
+                if rc == 0:
+                    if not out_file:
+                        bg_logs.append(f"   ⚠️ Debug: out_file is empty")
+                        log_to_file(f"   ⚠️ Debug: out_file is empty")
+                    elif not file_exists:
+                        bg_logs.append(f"   ⚠️ Debug: file not found at {out_file}")
+                        log_to_file(f"   ⚠️ Debug: file not found at {out_file}")
+                    elif not file_valid:
+                        file_size = get_file_size(out_file) if file_exists else 0
+                        bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing </mzML> tag)")
+                        log_to_file(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation")
+            
+            ok = rc == 0 and file_exists and file_valid
 
             with bg_lock:
                 if ok:
