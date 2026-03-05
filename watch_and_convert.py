@@ -7,8 +7,7 @@ Detection strategy:
 - Consider a directory "complete" when its total size is stable across N checks.
 
 Conversion strategy:
-- use a local `tdf2mzml.py` if available.
-- Otherwise attempt a Docker fallback using `mfreitas/tdf2mzml` image.
+- Uses Docker with `mfreitas/tdf2mzml` image for conversion.
 
 Usage: run in the directory to watch, or pass `--dir`.
 """
