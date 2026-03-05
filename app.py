@@ -562,7 +562,7 @@ with action_col2:
         st.rerun()
 
 with action_col3:
-    if st.button("🔄 Reset Status", use_container_width=True):
+    if st.button("🔄 Reset Status", use_container_width=True, help="Clear all conversion statuses, progress bars, and error messages. Use this to start fresh or retry failed conversions."):
         # Clear both session state and background stores
         st.session_state.statuses = {}
         st.session_state.progress = {}
