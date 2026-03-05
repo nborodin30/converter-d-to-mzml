@@ -12,13 +12,11 @@ import time
 from datetime import datetime
 import streamlit as st
 
-from watch_and_convert import run_conversion, is_valid_mzml
-
-# ─────────────────────────────────────────────────────────────────────────────
-# File logging setup
-# ─────────────────────────────────────────────────────────────────────────────
+from watch_and_convert import run_conversion, is_valid_mzml, is_blank_sample, dir_size
 from pathlib import Path
-# Use __file__ to get the directory of this script (more reliable than cwd)
+
+# File logging setup
+# Use __file__ to get the directory of this script
 APP_DIR = Path(__file__).parent.resolve()
 LOG_FILE = APP_DIR / "conversion.log"
 
@@ -29,14 +27,12 @@ def log_to_file(message: str):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
         with open(str(LOG_FILE), "a") as f:
             f.write(f"{timestamp} INFO: [GUI] {message}\n")
-            f.flush()  # Force write to buffer
-            os.fsync(f.fileno())  # Force write to disk
+            f.flush()  
+            os.fsync(f.fileno()) 
     except Exception:
-        pass  # Don't fail if logging fails
+        pass  
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Page config
-# ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="TDF → mzML Converter",
     page_icon="🧪",
@@ -44,9 +40,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Session state initialization
-# ─────────────────────────────────────────────────────────────────────────────
 if "statuses" not in st.session_state:
     st.session_state.statuses = {}
 if "logs" not in st.session_state:
@@ -58,7 +53,7 @@ if "src_dir" not in st.session_state:
 if "out_dir" not in st.session_state:
     st.session_state.out_dir = os.path.abspath(".")
 
-# Background thread-safe stores (use st.session_state for persistence across reruns)
+# Background thread-safe stores
 if "bg_lock" not in st.session_state:
     st.session_state.bg_lock = threading.Lock()
 if "bg_statuses" not in st.session_state:
@@ -86,17 +81,9 @@ bg_output_paths = st.session_state.bg_output_paths
 bg_errors = st.session_state.bg_errors
 bg_control = st.session_state.bg_control
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
-# ─────────────────────────────────────────────────────────────────────────────
 # Regex pattern to match blank samples (e.g., "Blank-02", "Blank_1", "Blank01")
 BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
-
-
-def is_blank_sample(name: str) -> bool:
-    """Check if a folder name represents a blank sample."""
-    return bool(BLANK_PATTERN.search(name))
 
 
 def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
@@ -108,24 +95,11 @@ def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
         entries = []
     return sorted(entries)
 
-
 def list_subdirs(path: str) -> list[str]:
     try:
         return sorted([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
     except Exception:
         return []
-
-
-def dir_size(path: str) -> int:
-    """Calculate total size of a directory in bytes."""
-    total = 0
-    for root, dirs, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return total
 
 
 def get_file_size(path: str) -> int:
@@ -134,10 +108,9 @@ def get_file_size(path: str) -> int:
         return os.path.getsize(path) if os.path.exists(path) else 0
     except OSError:
         return 0
-
-
-def shorten_name(name: str, max_len: int = 50) -> str:
-    return name if len(name) <= max_len else name[: max_len - 3] + "..."
+    
+#Function for shortening long names    
+#def shorten_name(name: str, max_len: int = 50) -> str: return name if len(name) <= max_len else name[: max_len - 3] + "..."
 
 
 def get_mzml_status(d_folder_name: str, out_dir: str, validate_interval: int = 1) -> tuple[str, str]:
@@ -202,9 +175,8 @@ def is_docker_running() -> tuple[bool, str]:
         return False, f"Docker check failed: {e}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Conversion worker
-# ─────────────────────────────────────────────────────────────────────────────
+
 def start_conversion(
     selected: list[str], src: str, out: str, docker_image: str
 ):
@@ -232,7 +204,7 @@ def start_conversion(
             full = os.path.join(src, name)
             out_path_dir = out or src
             
-            # Calculate expected mzML size (~62% of .d folder size)
+            # Calculate expected mzML size (~62,5% of .d folder size)
             d_size = dir_size(full)
             expected_mzml_size = int(d_size * 0.625)
             
@@ -315,9 +287,9 @@ def start_conversion(
     t.start()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Merge background updates into session state (runs on every rerun)
-# ─────────────────────────────────────────────────────────────────────────────
+
 with bg_lock:
     for k, v in bg_statuses.items():
         st.session_state.statuses[k] = v
@@ -354,7 +326,7 @@ for name, status in st.session_state.statuses.items():
             st.session_state.progress[name] = pct
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # UI Layout
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("# 🧪 TDF → mzML Converter")
@@ -367,9 +339,8 @@ if docker_ok:
 else:
     st.error(f"🐳 {docker_msg}")
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Settings Section
-# ─────────────────────────────────────────────────────────────────────────────
 with st.expander("⚙️ Settings", expanded=True):
     col1, col2 = st.columns(2)
 
@@ -443,13 +414,10 @@ with st.expander("⚙️ Settings", expanded=True):
     docker_image = st.text_input("Docker image", value="mfreitas/tdf2mzml")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Dataset Selection
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("### 📁 Available Datasets")
-
 ds = list_d_folders(st.session_state.src_dir)
-
 if not ds:
     st.warning("No `.d` folders found in the source directory.")
 else:
@@ -528,13 +496,11 @@ else:
     st.markdown(f"**Selected:** {len(selected)} / {len(ds)}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Actions
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("### 🚀 Actions")
 
 has_active = any(s in ("running", "queued") for s in st.session_state.statuses.values())
-
 action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
 
 with action_col1:
@@ -578,9 +544,8 @@ with action_col3:
         st.rerun()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Conversion Logs
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("### 📋 Conversion Logs")
 
 # Show refresh time and log file status (always visible)
@@ -621,7 +586,7 @@ with log_tab2:
             
             st.caption(f"{len(lines)} log lines")
             
-            # Show newest first (no expander - always visible)
+            # Show newest first
             if lines:
                 st.code("\n".join(reversed(lines[-100:])), language=None)
             else:
@@ -631,16 +596,12 @@ with log_tab2:
     else:
         st.caption(f"No conversion.log found at `{log_file_path}`. Start a conversion to create it.")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Footer
-# ─────────────────────────────────────────────────────────────────────────────
 st.divider()
 st.caption("💡 This GUI uses `watch_and_convert.py` for conversion.")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Auto-refresh (must be at end of script)
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Auto-refresh 
+# (should be at the end of the script to ensure all UI elements are defined before rerun)
 log_recently_modified = False
 try:
     log_mtime = LOG_FILE.stat().st_mtime

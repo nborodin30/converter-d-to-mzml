@@ -28,11 +28,9 @@ from typing import Dict, Tuple, Callable
 # Regex pattern to match blank samples (e.g., "Blank-02", "Blank_1", "Blank01")
 BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
 
-
 def is_blank_sample(name: str) -> bool:
     """Check if a folder name represents a blank sample."""
     return bool(BLANK_PATTERN.search(name))
-
 
 def dir_size(path: str) -> int:
     total = 0
