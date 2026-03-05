@@ -179,8 +179,8 @@ def is_docker_running() -> tuple[bool, str]:
 
 def wait_for_stable_size(
     folder_path: str,
-    check_interval: int = 5,
-    stability_checks: int = 2,
+    check_interval: int = 10,
+    stability_checks: int = 3,
     log_callback=None,
     stop_flag=None,
 ) -> bool:
@@ -226,7 +226,7 @@ def wait_for_stable_size(
 
 def start_conversion(
     selected: list[str], src: str, out: str, docker_image: str,
-    stability_check_interval: int = 5, stability_checks: int = 2,
+    stability_check_interval: int = 10, stability_checks: int = 3,
 ):
     bg_control["stop"] = False  # Reset stop flag
     
