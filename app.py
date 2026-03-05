@@ -146,6 +146,8 @@ def status_badge(status: str) -> str:
         return "✅ Done"
     elif status == "queued":
         return "⏳ Queued"
+    elif status == "waiting":
+        return "⏳ Checking"
     elif status == "stopped":
         return "⏹️ Stopped"
     elif status.startswith("failed"):
@@ -175,10 +177,56 @@ def is_docker_running() -> tuple[bool, str]:
         return False, f"Docker check failed: {e}"
 
 
+def wait_for_stable_size(
+    folder_path: str,
+    check_interval: int = 5,
+    stability_checks: int = 2,
+    log_callback=None,
+    stop_flag=None,
+) -> bool:
+    """Wait until folder size is stable (not being copied).
+    
+    Returns True if stable, False if stopped or error.
+    """
+    stable_count = 0
+    last_size = -1
+    
+    while stable_count < stability_checks:
+        # Check stop flag
+        if stop_flag and stop_flag.get("stop"):
+            return False
+        
+        try:
+            current_size = dir_size(folder_path)
+        except Exception as e:
+            if log_callback:
+                log_callback(f"⚠️ Error checking folder size: {e}")
+            return False
+        
+        if current_size == last_size:
+            stable_count += 1
+            if log_callback:
+                log_callback(f"   📊 Size stable: {current_size / (1024*1024):.1f} MB (check {stable_count}/{stability_checks})")
+        else:
+            stable_count = 0
+            if log_callback and last_size >= 0:
+                log_callback(f"   📊 Size changed: {last_size / (1024*1024):.1f} → {current_size / (1024*1024):.1f} MB, waiting...")
+            elif log_callback:
+                log_callback(f"   📊 Initial size: {current_size / (1024*1024):.1f} MB, checking stability...")
+        
+        last_size = current_size
+        
+        if stable_count < stability_checks:
+            time.sleep(check_interval)
+    
+    return True
+
+
 # Conversion worker
 
 def start_conversion(
-    selected: list[str], src: str, out: str, docker_image: str
+    selected: list[str], src: str, out: str, docker_image: str,
+    stability_check_interval: int = 5, stability_checks: int = 2,
 ):
     bg_control["stop"] = False  # Reset stop flag
     
@@ -203,6 +251,34 @@ def start_conversion(
                 break
             full = os.path.join(src, name)
             out_path_dir = out or src
+            
+            # Wait for folder size to stabilize (ensure copy is complete)
+            with bg_lock:
+                bg_statuses[name] = "waiting"
+                msg = f"⏳ Waiting for {name} to finish copying..."
+                bg_logs.append(msg)
+                log_to_file(msg)
+            
+            def _stability_log(msg):
+                with bg_lock:
+                    bg_logs.append(msg)
+                log_to_file(msg)
+            
+            is_stable = wait_for_stable_size(
+                full,
+                check_interval=stability_check_interval,
+                stability_checks=stability_checks,
+                log_callback=_stability_log,
+                stop_flag=bg_control,
+            )
+            
+            if not is_stable:
+                with bg_lock:
+                    bg_statuses[name] = "stopped"
+                    msg = f"⏹️ Skipped {name} (stopped or error)"
+                    bg_logs.append(msg)
+                    log_to_file(msg)
+                continue
             
             # Calculate expected mzML size (~62,5% of .d folder size)
             d_size = dir_size(full)
@@ -478,7 +554,9 @@ else:
                 st.session_state.progress[name] = pct
                 st.progress(pct / 100, text=f"{pct}% ({current_size/(1024*1024):.0f}/{expected_size/(1024*1024):.0f} MB)")
             elif status == "queued":
-                st.caption("⏳ Waiting...")
+                st.caption("⏳ In queue...")
+            elif status == "waiting":
+                st.caption("📊 Checking if copy is complete...")
             elif status == "done":
                 st.progress(1.0, text="100%")
             elif status and status.startswith("failed"):
@@ -500,7 +578,7 @@ else:
 # Actions
 st.markdown("### 🚀 Actions")
 
-has_active = any(s in ("running", "queued") for s in st.session_state.statuses.values())
+has_active = any(s in ("running", "queued", "waiting") for s in st.session_state.statuses.values())
 action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
 
 with action_col1:

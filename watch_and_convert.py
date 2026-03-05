@@ -42,6 +42,7 @@ def dir_size(path: str) -> int:
                 pass
     return total
 
+
 def has_required_files(path: str, size_check_seconds: int = 1) -> bool:
     """Return True if the directory contains expected TDF files.
 
