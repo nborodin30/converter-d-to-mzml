@@ -86,7 +86,7 @@ python ./watch_and_convert.py --dir /path/to/watch
 
 - A `.d` folder is considered ready when its total size is stable for the configured number of checks and it contains `analysis.tdf` or `analysis.tdf_bin`.
 - Conversion is skipped if a valid `.mzML` already exists.
-- Expected mzML size is ~62% of the `.d` folder size.
+- Expected mzML size is ~87% of the `.d` folder size.
 
 ## Installing tdf2mzml
 
