@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streamlit GUI for TDF → mzML Converter."""
+"""Streamlit GUI for mzML Converter."""
 
 import logging
 import os
@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import streamlit as st
 
@@ -34,7 +35,7 @@ def log_to_file(message: str):
 
 # Page config
 st.set_page_config(
-    page_title="TDF → mzML Converter",
+    page_title="mzML Converter",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -224,163 +225,212 @@ def wait_for_stable_size(
 
 # Conversion worker
 
+def convert_single_dataset(
+    name: str, src: str, out: str, docker_image: str,
+    stability_check_interval: int = 10, stability_checks: int = 3,
+) -> bool:
+    """Convert a single .d folder. Returns True on success."""
+    # Check stop flag before starting
+    if bg_control["stop"]:
+        with bg_lock:
+            bg_statuses[name] = "stopped"
+        return False
+    
+    full = os.path.join(src, name)
+    out_path_dir = out or src
+    
+    # Wait for folder size to stabilize (ensure copy is complete)
+    with bg_lock:
+        bg_statuses[name] = "waiting"
+        msg = f"⏳ Waiting for {name} to finish copying..."
+        bg_logs.append(msg)
+        log_to_file(msg)
+    
+    def _stability_log(msg):
+        with bg_lock:
+            bg_logs.append(msg)
+        log_to_file(msg)
+    
+    is_stable = wait_for_stable_size(
+        full,
+        check_interval=stability_check_interval,
+        stability_checks=stability_checks,
+        log_callback=_stability_log,
+        stop_flag=bg_control,
+    )
+    
+    if not is_stable:
+        with bg_lock:
+            bg_statuses[name] = "stopped"
+            msg = f"⏹️ Skipped {name} (stopped or error)"
+            bg_logs.append(msg)
+            log_to_file(msg)
+        return False
+    
+    # Calculate expected mzML size (~87% of .d folder size)
+    d_size = dir_size(full)
+    expected_mzml_size = int(d_size * 0.87)
+    
+    # Determine output file path
+    base_name = name[:-2] if name.endswith(".d") else name
+    out_file_path = os.path.join(out_path_dir, base_name + ".mzML")
+
+    # Initialize error list for this dataset
+    error_lines = []
+
+    with bg_lock:
+        bg_statuses[name] = "running"
+        bg_progress[name] = 0
+        bg_expected_sizes[name] = expected_mzml_size
+        bg_output_paths[name] = out_file_path
+        bg_errors[name] = []  # Clear previous errors
+        logs_to_add = [
+            f"▶ Starting: {name}",
+            f"   .d size: {d_size / (1024*1024):.1f} MB, expected mzML: ~{expected_mzml_size / (1024*1024):.1f} MB",
+            f"   Input path: {full}",
+            f"   Output path: {out_file_path}",
+            f"   Docker image: {docker_image}",
+            f"⏳ Launching Docker container...",
+        ]
+        for log_msg in logs_to_add:
+            bg_logs.append(log_msg)
+            log_to_file(log_msg)
+
+    def _line_cb(line: str, dataset=name, expected=expected_mzml_size, mzml_path=out_file_path, errors=error_lines):
+        with bg_lock:
+            bg_logs.append(line)
+        log_to_file(line)
+        
+        # Capture error/warning lines
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in ["error", "exception", "failed", "traceback", "cannot", "unable", "warning", "fatal", "abort", "invalid", "denied", "refused"]):
+            errors.append(line)
+        
+        # Update progress based on output file size
+        if expected > 0:
+            current_size = get_file_size(mzml_path)
+            pct = min(99, int((current_size / expected) * 100))  # Cap at 99% until validated
+            with bg_lock:
+                bg_progress[dataset] = pct
+
+    try:
+        rc, out_file = run_conversion(
+            full,
+            out_path_dir,
+            docker_image=docker_image,
+            line_callback=_line_cb,
+        )
+    except Exception as e:
+        rc, out_file = 99, ""
+        error_lines.append(f"Exception: {e}")
+        with bg_lock:
+            bg_logs.append(f"❌ Exception: {e}")
+        log_to_file(f"❌ Exception: {e}")
+
+    # Wait a bit for filesystem to sync after Docker exits
+    time.sleep(2)
+    
+    # Check each condition separately for debugging
+    file_exists = out_file and os.path.exists(out_file)
+    file_valid = file_exists and is_valid_mzml(out_file, validate_interval=2)
+    
+    # Log detailed status
+    with bg_lock:
+        if rc == 0:
+            if not out_file:
+                bg_logs.append(f"   ⚠️ Debug: out_file is empty")
+                log_to_file(f"   ⚠️ Debug: out_file is empty")
+            elif not file_exists:
+                bg_logs.append(f"   ⚠️ Debug: file not found at {out_file}")
+                log_to_file(f"   ⚠️ Debug: file not found at {out_file}")
+            elif not file_valid:
+                file_size = get_file_size(out_file) if file_exists else 0
+                bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing closing tag)")
+                log_to_file(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation")
+    
+    ok = rc == 0 and file_exists and file_valid
+
+    with bg_lock:
+        if ok:
+            final_size = get_file_size(out_file)
+            bg_statuses[name] = "done"
+            bg_progress[name] = 100
+            bg_errors[name] = []  # Clear errors on success
+            msg = f"✅ Completed: {name} ({final_size / (1024*1024):.1f} MB)"
+            bg_logs.append(msg)
+            log_to_file(msg)
+        else:
+            bg_statuses[name] = f"failed (rc={rc})"
+            # Store all captured error lines
+            bg_errors[name] = error_lines if error_lines else [f"Conversion failed with exit code {rc}"]
+            msg = f"❌ Failed: {name} (rc={rc})"
+            bg_logs.append(msg)
+            log_to_file(msg)
+    
+    return ok
+
+
 def start_conversion(
     selected: list[str], src: str, out: str, docker_image: str,
     stability_check_interval: int = 10, stability_checks: int = 3,
+    max_workers: int = 2,
 ):
+    """Start parallel conversion of multiple datasets."""
     bg_control["stop"] = False  # Reset stop flag
     
     # Add immediate log entry
     with bg_lock:
-        msg = f"🚀 Starting conversion of {len(selected)} dataset(s)..."
+        msg = f"🚀 Starting parallel conversion of {len(selected)} dataset(s) with {max_workers} worker(s)..."
         bg_logs.append(msg)
         log_to_file(msg)
     
-    def worker():
-        for name in selected:
-            # Check stop flag before starting each conversion
-            if bg_control["stop"]:
-                with bg_lock:
-                    msg = "⛔ Conversion stopped by user"
-                    bg_logs.append(msg)
-                    log_to_file(msg)
-                    # Mark remaining queued items as stopped
-                    for n in selected:
-                        if bg_statuses.get(n) == "queued":
-                            bg_statuses[n] = "stopped"
-                break
-            full = os.path.join(src, name)
-            out_path_dir = out or src
+    def orchestrator():
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    convert_single_dataset, name, src, out, docker_image,
+                    stability_check_interval, stability_checks
+                ): name for name in selected
+            }
             
-            # Wait for folder size to stabilize (ensure copy is complete)
+            completed = 0
+            failed = 0
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    success = future.result()
+                    if success:
+                        completed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    with bg_lock:
+                        bg_logs.append(f"❌ Worker exception for {name}: {e}")
+                        log_to_file(f"❌ Worker exception for {name}: {e}")
+                
+                # Check if stop was requested
+                if bg_control["stop"]:
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    with bg_lock:
+                        msg = f"⛔ Conversion stopped. Completed: {completed}, Failed: {failed}"
+                        bg_logs.append(msg)
+                        log_to_file(msg)
+                        # Mark remaining queued items as stopped
+                        for n in selected:
+                            if bg_statuses.get(n) == "queued":
+                                bg_statuses[n] = "stopped"
+                    break
+            
+            # Final summary
             with bg_lock:
-                bg_statuses[name] = "waiting"
-                msg = f"⏳ Waiting for {name} to finish copying..."
+                msg = f"🏁 Conversion batch finished. Completed: {completed}, Failed: {failed}"
                 bg_logs.append(msg)
                 log_to_file(msg)
-            
-            def _stability_log(msg):
-                with bg_lock:
-                    bg_logs.append(msg)
-                log_to_file(msg)
-            
-            is_stable = wait_for_stable_size(
-                full,
-                check_interval=stability_check_interval,
-                stability_checks=stability_checks,
-                log_callback=_stability_log,
-                stop_flag=bg_control,
-            )
-            
-            if not is_stable:
-                with bg_lock:
-                    bg_statuses[name] = "stopped"
-                    msg = f"⏹️ Skipped {name} (stopped or error)"
-                    bg_logs.append(msg)
-                    log_to_file(msg)
-                continue
-            
-            # Calculate expected mzML size (~87% of .d folder size)
-            d_size = dir_size(full)
-            expected_mzml_size = int(d_size * 0.87)
-            
-            # Determine output file path
-            base_name = name[:-2] if name.endswith(".d") else name
-            out_file_path = os.path.join(out_path_dir, base_name + ".mzML")
-
-            # Initialize error list for this dataset
-            error_lines = []
-
-            with bg_lock:
-                bg_statuses[name] = "running"
-                bg_progress[name] = 0
-                bg_expected_sizes[name] = expected_mzml_size
-                bg_output_paths[name] = out_file_path
-                bg_errors[name] = []  # Clear previous errors
-                logs_to_add = [
-                    f"▶ Starting: {name}",
-                    f"   .d size: {d_size / (1024*1024):.1f} MB, expected mzML: ~{expected_mzml_size / (1024*1024):.1f} MB",
-                    f"   Input path: {full}",
-                    f"   Output path: {out_file_path}",
-                    f"   Docker image: {docker_image}",
-                    f"⏳ Launching Docker container...",
-                ]
-                for log_msg in logs_to_add:
-                    bg_logs.append(log_msg)
-                    log_to_file(log_msg)
-
-            def _line_cb(line: str, dataset=name, expected=expected_mzml_size, mzml_path=out_file_path, errors=error_lines):
-                with bg_lock:
-                    bg_logs.append(line)
-                log_to_file(line)
-                
-                # Capture error/warning lines
-                line_lower = line.lower()
-                if any(kw in line_lower for kw in ["error", "exception", "failed", "traceback", "cannot", "unable", "warning", "fatal", "abort", "invalid", "denied", "refused"]):
-                    errors.append(line)
-                
-                # Update progress based on output file size
-                if expected > 0:
-                    current_size = get_file_size(mzml_path)
-                    pct = min(99, int((current_size / expected) * 100))  # Cap at 99% until validated
-                    with bg_lock:
-                        bg_progress[dataset] = pct
-
-            try:
-                rc, out_file = run_conversion(
-                    full,
-                    out_path_dir,
-                    docker_image=docker_image,
-                    line_callback=_line_cb,
-                )
-            except Exception as e:
-                rc, out_file = 99, ""
-                error_lines.append(f"Exception: {e}")
-                with bg_lock:
-                    bg_logs.append(f"❌ Exception: {e}")
-                log_to_file(f"❌ Exception: {e}")
-
-            # Wait a bit for filesystem to sync after Docker exits
-            time.sleep(2)
-            
-            # Check each condition separately for debugging
-            file_exists = out_file and os.path.exists(out_file)
-            file_valid = file_exists and is_valid_mzml(out_file, validate_interval=2)
-            
-            # Log detailed status
-            with bg_lock:
-                if rc == 0:
-                    if not out_file:
-                        bg_logs.append(f"   ⚠️ Debug: out_file is empty")
-                        log_to_file(f"   ⚠️ Debug: out_file is empty")
-                    elif not file_exists:
-                        bg_logs.append(f"   ⚠️ Debug: file not found at {out_file}")
-                        log_to_file(f"   ⚠️ Debug: file not found at {out_file}")
-                    elif not file_valid:
-                        file_size = get_file_size(out_file) if file_exists else 0
-                        bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing closing tag)")
-                        log_to_file(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation")
-            
-            ok = rc == 0 and file_exists and file_valid
-
-            with bg_lock:
-                if ok:
-                    final_size = get_file_size(out_file)
-                    bg_statuses[name] = "done"
-                    bg_progress[name] = 100
-                    bg_errors[name] = []  # Clear errors on success
-                    msg = f"✅ Completed: {name} ({final_size / (1024*1024):.1f} MB)"
-                    bg_logs.append(msg)
-                    log_to_file(msg)
-                else:
-                    bg_statuses[name] = f"failed (rc={rc})"
-                    # Store all captured error lines
-                    bg_errors[name] = error_lines if error_lines else [f"Conversion failed with exit code {rc}"]
-                    msg = f"❌ Failed: {name} (rc={rc})"
-                    bg_logs.append(msg)
-                    log_to_file(msg)
-
-    t = threading.Thread(target=worker, daemon=True)
+    
+    t = threading.Thread(target=orchestrator, daemon=True)
     t.start()
 
 
@@ -426,7 +476,7 @@ for name, status in st.session_state.statuses.items():
 
 # UI Layout
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🧪 TDF → mzML Converter")
+st.markdown("# 🧪 mzML Converter")
 st.caption("Convert Bruker `.d` folders to mzML format using Docker.")
 
 # Check Docker status
@@ -508,7 +558,11 @@ with st.expander("⚙️ Settings", expanded=True):
         st.caption(f"📂 {st.session_state.out_dir}")
 
     st.divider()
-    docker_image = st.text_input("Docker image", value="mfreitas/tdf2mzml")
+    settings_col1, settings_col2 = st.columns(2)
+    with settings_col1:
+        docker_image = st.text_input("Docker image", value="mfreitas/tdf2mzml")
+    with settings_col2:
+        max_workers = st.number_input("Parallel workers", min_value=1, max_value=8, value=1, help="Number of simultaneous conversions")
 
 
 
@@ -617,6 +671,7 @@ with action_col1:
                 st.session_state.src_dir,
                 st.session_state.out_dir,
                 docker_image,
+                max_workers=max_workers,
             )
             st.rerun()
 

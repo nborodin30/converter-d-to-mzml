@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Tuple, Callable
 
 # Regex pattern to match blank samples (e.g., "Blank-02", "Blank_1", "Blank01")
@@ -267,13 +268,14 @@ def watch_directory(
     dry_run: bool = False,
     docker_image: str = "mfreitas/tdf2mzml",
     validate_interval: int = 0,
+    max_workers: int = 1,
 ):
     out_dir = out_dir or watch_dir
     os.makedirs(out_dir, exist_ok=True)
 
     known_processing = set()
 
-    logging.info("Watching %s every %ss, stability=%s", watch_dir, poll_interval, stability_checks)
+    logging.info("Watching %s every %ss, stability=%s, max_workers=%d", watch_dir, poll_interval, stability_checks, max_workers)
 
     # initial snapshot: list detected .d dirs and their states (excluding blanks)
     all_dirs = [d for d in os.listdir(watch_dir) if d.endswith(".d") and os.path.isdir(os.path.join(watch_dir, d)) and not is_blank_sample(d)]
@@ -350,27 +352,55 @@ def watch_directory(
                 logging.info("Detected stable directory: %s (size %d). Queue position: %d/%d", full, cur_size, idx, pending_count)
                 # mark processing (in-memory only; do not rely on on-disk marker files)
                 known_processing.add(full)
-                logging.info("Starting conversion for %s", full)
-                try:
-                    rc, expected_out = run_conversion(full, out_dir, docker_image=docker_image, dry_run=dry_run)
-                except Exception:
-                    logging.exception("Conversion raised exception for %s", full)
-                    rc, expected_out = 99, ""
 
-                if rc == 0:
-                    if expected_out and os.path.exists(expected_out):
-                        logging.info("Conversion succeeded for %s; output: %s", full, expected_out)
-                    else:
-                        logging.error("Conversion reported rc=0 but output missing for %s (expected %s)", full, expected_out)
-                        # treat as failure so it can be retried
+        # Collect directories ready for conversion
+        ready_for_conversion = []
+        for name in cand:
+            full = os.path.join(watch_dir, name)
+            if full in known_processing:
+                last_size, stable_count = sizes.get(full, (0, 0))
+                if stable_count >= stability_checks:
+                    ready_for_conversion.append(full)
+
+        # Process conversions in parallel using ThreadPoolExecutor
+        if ready_for_conversion:
+            logging.info("Starting parallel conversion of %d directories with %d workers", len(ready_for_conversion), max_workers)
+            
+            def convert_one(full_path: str) -> tuple[str, int, str]:
+                """Convert a single directory. Returns (path, rc, output_path)."""
+                logging.info("Starting conversion for %s", full_path)
+                try:
+                    rc, expected_out = run_conversion(full_path, out_dir, docker_image=docker_image, dry_run=dry_run)
+                except Exception:
+                    logging.exception("Conversion raised exception for %s", full_path)
+                    rc, expected_out = 99, ""
+                return full_path, rc, expected_out
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(convert_one, full): full for full in ready_for_conversion}
+                
+                for future in as_completed(futures):
+                    full = futures[future]
+                    try:
+                        full_path, rc, expected_out = future.result()
+                        
+                        if rc == 0:
+                            if expected_out and os.path.exists(expected_out):
+                                logging.info("Conversion succeeded for %s; output: %s", full_path, expected_out)
+                            else:
+                                logging.error("Conversion reported rc=0 but output missing for %s (expected %s)", full_path, expected_out)
+                                # treat as failure so it can be retried
+                                known_processing.discard(full_path)
+                                sizes.pop(full_path, None)
+                        else:
+                            logging.error("Conversion failed (rc=%s) for %s", rc, full_path)
+                            # allow re-try later
+                            known_processing.discard(full_path)
+                            sizes.pop(full_path, None)
+                    except Exception as e:
+                        logging.exception("Worker exception for %s: %s", full, e)
                         known_processing.discard(full)
                         sizes.pop(full, None)
-                        
-                else:
-                    logging.error("Conversion failed (rc=%s) for %s", rc, full)
-                    # allow re-try later
-                    known_processing.discard(full)
-                    sizes.pop(full, None)
 
         time.sleep(poll_interval)
 
@@ -382,6 +412,7 @@ def parse_args():
     p.add_argument("--stability-checks", type=int, default=2, help="Number of identical-size checks before triggering conversion")
     p.add_argument("--out", default=None, help="Output directory for mzML files (defaults to watch dir)")
     p.add_argument("--docker-image", default="mfreitas/tdf2mzml", help="Docker image to use for tdf2mzml")
+    p.add_argument("--max-workers", type=int, default=1, help="Number of parallel conversions (default: 1)")
     p.add_argument("--log-file", default=None, help="Path to logfile (appends). If omitted, logs go to stderr")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     p.add_argument("--dry-run", action="store_true", help="Don't run conversion, only report candidates")
@@ -407,6 +438,7 @@ def main():
             dry_run=args.dry_run,
             docker_image=args.docker_image,
             validate_interval=args.validate_interval,
+            max_workers=args.max_workers,
         )
     except KeyboardInterrupt:
         logging.info("Exiting on user interrupt")

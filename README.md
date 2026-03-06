@@ -53,9 +53,12 @@ streamlit run app.py
 Features:
 - Browse and select source/output directories
 - Select multiple `.d` folders for conversion
+- Parallel conversion with configurable workers (default: 1)
 - Real-time progress bars and status updates
 - View conversion logs (GUI logs + `conversion.log` file)
 - Filter out blank samples automatically
+- Stop/reset conversion controls
+- Error details for failed conversions
 
 ## CLI Watcher Usage
 
@@ -78,6 +81,7 @@ python ./watch_and_convert.py --dir /path/to/watch
 - `--stability-checks`: Number of identical-size checks before triggering conversion (default: 2)
 - `--out`: Output directory for mzML files (defaults to watch dir)
 - `--docker-image`: Docker image to use (default: `mfreitas/tdf2mzml`)
+- `--max-workers`: Number of parallel conversions (default: 1)
 - `--validate-interval`: Seconds to wait before validating mzML output (default: 0)
 - `--log-file`: Log file path (default: `<watch_dir>/conversion.log`)
 - `--log-level`: Logging level (`DEBUG|INFO|WARNING|ERROR|CRITICAL`)
