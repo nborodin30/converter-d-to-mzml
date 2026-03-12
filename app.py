@@ -87,7 +87,9 @@ bg_control = st.session_state.bg_control
 BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
 
 
+@st.cache_data(ttl=5, show_spinner=False)
 def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
+    """List .d folders in path. Cached for 5 seconds."""
     try:
         entries = [d for d in os.listdir(path) if d.endswith(".d") and os.path.isdir(os.path.join(path, d))]
         if exclude_blanks:
@@ -96,7 +98,9 @@ def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
         entries = []
     return sorted(entries)
 
+@st.cache_data(ttl=5, show_spinner=False)
 def list_subdirs(path: str) -> list[str]:
+    """List subdirectories in path. Cached for 5 seconds."""
     try:
         return sorted([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
     except Exception:
@@ -114,8 +118,9 @@ def get_file_size(path: str) -> int:
 #def shorten_name(name: str, max_len: int = 50) -> str: return name if len(name) <= max_len else name[: max_len - 3] + "..."
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_mzml_status(d_folder_name: str, out_dir: str, validate_interval: int = 1) -> tuple[str, str]:
-    """Check if mzML exists and whether it's valid.
+    """Check if mzML exists and whether it's valid. Cached for 10 seconds.
     Returns (status_code, display_text) where status_code is:
     - 'none': no mzML file
     - 'valid': mzML exists and is valid
@@ -156,8 +161,9 @@ def status_badge(status: str) -> str:
     return status
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def is_docker_running() -> tuple[bool, str]:
-    """Check if Docker daemon is running.
+    """Check if Docker daemon is running. Cached for 10 seconds.
     Returns (is_running, message)"""
     if not shutil.which("docker"):
         return False, "Docker is not installed"
@@ -479,12 +485,18 @@ for name, status in st.session_state.statuses.items():
 st.markdown("# 🧪 mzML Converter")
 st.caption("Convert Bruker `.d` folders to mzML format using Docker.")
 
-# Check Docker status
-docker_ok, docker_msg = is_docker_running()
-if docker_ok:
-    st.success(f"🐳 {docker_msg}")
-else:
-    st.error(f"🐳 {docker_msg}")
+# Check Docker status with refresh button
+docker_col, refresh_col = st.columns([6, 1])
+with docker_col:
+    docker_ok, docker_msg = is_docker_running()
+    if docker_ok:
+        st.success(f"🐳 {docker_msg}")
+    else:
+        st.error(f"🐳 {docker_msg}")
+with refresh_col:
+    if st.button("🔄", help="Refresh page and clear caches"):
+        st.cache_data.clear()
+        st.rerun()
 
 
 # Settings Section
@@ -682,7 +694,7 @@ with action_col2:
         st.rerun()
 
 with action_col3:
-    if st.button("🔄 Reset Status", use_container_width=True, help="Clear all conversion statuses, progress bars, and error messages. Use this to start fresh or retry failed conversions."):
+    if st.button("🔄 Reset Status", use_container_width=True, help="Clear all conversion statuses, progress bars, error messages, and caches. Use this to start fresh or retry failed conversions."):
         # Clear both session state and background stores
         st.session_state.statuses = {}
         st.session_state.progress = {}
@@ -694,6 +706,8 @@ with action_col3:
             bg_errors.clear()
             bg_expected_sizes.clear()
             bg_output_paths.clear()
+        # Clear all caches to force refresh of directory listings and mzML status
+        st.cache_data.clear()
         st.toast("Status reset!", icon="🔄")
         st.rerun()
 
