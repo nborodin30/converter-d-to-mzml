@@ -87,7 +87,9 @@ bg_control = st.session_state.bg_control
 BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
 
 
+@st.cache_data(ttl=5, show_spinner=False)
 def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
+    """List .d folders in path. Cached for 5 seconds."""
     try:
         entries = [d for d in os.listdir(path) if d.endswith(".d") and os.path.isdir(os.path.join(path, d))]
         if exclude_blanks:
@@ -96,7 +98,9 @@ def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
         entries = []
     return sorted(entries)
 
+@st.cache_data(ttl=5, show_spinner=False)
 def list_subdirs(path: str) -> list[str]:
+    """List subdirectories in path. Cached for 5 seconds."""
     try:
         return sorted([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
     except Exception:
@@ -114,8 +118,9 @@ def get_file_size(path: str) -> int:
 #def shorten_name(name: str, max_len: int = 50) -> str: return name if len(name) <= max_len else name[: max_len - 3] + "..."
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_mzml_status(d_folder_name: str, out_dir: str, validate_interval: int = 1) -> tuple[str, str]:
-    """Check if mzML exists and whether it's valid.
+    """Check if mzML exists and whether it's valid. Cached for 10 seconds.
     Returns (status_code, display_text) where status_code is:
     - 'none': no mzML file
     - 'valid': mzML exists and is valid
@@ -156,8 +161,9 @@ def status_badge(status: str) -> str:
     return status
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def is_docker_running() -> tuple[bool, str]:
-    """Check if Docker daemon is running.
+    """Check if Docker daemon is running. Cached for 10 seconds.
     Returns (is_running, message)"""
     if not shutil.which("docker"):
         return False, "Docker is not installed"
@@ -572,14 +578,22 @@ ds = list_d_folders(st.session_state.src_dir)
 if not ds:
     st.warning("No `.d` folders found in the source directory.")
 else:
-    # Selection buttons (grouped together)
-    btn_cols = st.columns([1, 1, 5])
+    # Selection buttons
+    btn_cols = st.columns([1, 1, 1, 4])
     with btn_cols[0]:
         if st.button("☑️ Select All", use_container_width=True):
             for name in ds:
                 st.session_state[f"chk_{name}"] = True
             st.rerun()
     with btn_cols[1]:
+        # Select only not-converted datasets
+        not_converted = [name for name in ds if get_mzml_status(name, st.session_state.out_dir)[0] != "valid"]
+        if st.button(f"☑️ Not Converted ({len(not_converted)})", use_container_width=True):
+            # Clear all first, then select only not converted
+            for name in ds:
+                st.session_state[f"chk_{name}"] = name in not_converted
+            st.rerun()
+    with btn_cols[2]:
         if st.button("☐ Clear All", use_container_width=True):
             for name in ds:
                 st.session_state[f"chk_{name}"] = False
@@ -594,54 +608,57 @@ else:
         if key not in st.session_state:
             st.session_state[key] = False
 
-        # Show full name on its own row
-        col_chk, col_name = st.columns([0.05, 0.95])
+        # Get mzML status for this dataset
+        mzml_code, mzml_text = get_mzml_status(name, st.session_state.out_dir)
+        
+        # Single row: checkbox, name, mzML status badge
+        col_chk, col_name, col_mzml = st.columns([0.03, 0.77, 0.2])
         with col_chk:
             checked = st.checkbox("sel", key=key, label_visibility="collapsed")
         with col_name:
             st.markdown(f"**{name}**")
-        
-        # Status row below the name
-        _, col_mzml, col_status, col_progress = st.columns([0.05, 1.5, 1, 2])
         with col_mzml:
-            mzml_code, mzml_text = get_mzml_status(name, st.session_state.out_dir)
-            st.caption(mzml_text)
-        with col_status:
-            status = st.session_state.statuses.get(name)
-            if status:
+            # Show mzML status as a colored badge
+            if mzml_code == "valid":
+                st.success(mzml_text.replace("✅ ", ""), icon="✅")
+            elif mzml_code == "invalid":
+                st.warning(mzml_text.replace("⚠️ ", ""), icon="⚠️")
+        
+        # Conversion status row (only if there's an active/completed conversion)
+        status = st.session_state.statuses.get(name)
+        if status:
+            _, col_status, col_progress = st.columns([0.03, 0.3, 0.67])
+            with col_status:
                 st.caption(status_badge(status))
-        with col_progress:
-            status = st.session_state.statuses.get(name)
-            # Calculate progress directly based on file sizes for running conversion only
-            if status == "running":
-                d_folder_path = os.path.join(st.session_state.src_dir, name)
-                base_name = name[:-2] if name.endswith(".d") else name
-                mzml_path = os.path.join(st.session_state.out_dir, base_name + ".mzML")
-                
-                d_size = dir_size(d_folder_path)
-                expected_size = d_size * 0.87  # mzML is typically ~87% of .d size
-                current_size = get_file_size(mzml_path)
-                
-                if expected_size > 0:
-                    pct = min(99, int((current_size / expected_size) * 100))
-                else:
-                    pct = 0
-                st.session_state.progress[name] = pct
-                st.progress(pct / 100, text=f"{pct}% ({current_size/(1024*1024):.0f}/{expected_size/(1024*1024):.0f} MB)")
-            elif status == "queued":
-                st.caption("⏳ In queue...")
-            elif status == "waiting":
-                st.caption("📊 Checking if copy is complete...")
-            elif status == "done":
-                st.progress(1.0, text="100%")
-            elif status and status.startswith("failed"):
-                # Show error details for failed conversions
-                error_msgs = st.session_state.errors.get(name, [])
-                if error_msgs:
-                    with st.expander(f"🔍 Error details ({len(error_msgs)} lines)", expanded=False):
-                        st.code("\n".join(error_msgs), language=None)
-                else:
-                    st.caption("No error details captured")
+            with col_progress:
+                if status == "running":
+                    d_folder_path = os.path.join(st.session_state.src_dir, name)
+                    base_name = name[:-2] if name.endswith(".d") else name
+                    mzml_path = os.path.join(st.session_state.out_dir, base_name + ".mzML")
+                    
+                    d_size = dir_size(d_folder_path)
+                    expected_size = d_size * 0.87
+                    current_size = get_file_size(mzml_path)
+                    
+                    if expected_size > 0:
+                        pct = min(99, int((current_size / expected_size) * 100))
+                    else:
+                        pct = 0
+                    st.session_state.progress[name] = pct
+                    st.progress(pct / 100, text=f"{pct}% ({current_size/(1024*1024):.0f}/{expected_size/(1024*1024):.0f} MB)")
+                elif status == "queued":
+                    st.caption("⏳ In queue...")
+                elif status == "waiting":
+                    st.caption("📊 Checking if copy is complete...")
+                elif status == "done":
+                    st.progress(1.0, text="100%")
+                elif status.startswith("failed"):
+                    error_msgs = st.session_state.errors.get(name, [])
+                    if error_msgs:
+                        with st.expander(f"🔍 Error details ({len(error_msgs)} lines)", expanded=False):
+                            st.code("\n".join(error_msgs), language=None)
+                    else:
+                        st.caption("No error details captured")
 
         if checked:
             selected.append(name)
