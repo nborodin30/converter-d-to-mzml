@@ -1,4 +1,4 @@
-# TDF → mzML Converter
+# mzML Converter
 
 Convert Bruker timsTOF `.d` folders to mzML format using Docker.
 
