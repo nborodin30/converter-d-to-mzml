@@ -14,3 +14,5 @@ conversion.log
 # OS
 .DS_Store
 Thumbs.db
+.Rhistory
+test_data/

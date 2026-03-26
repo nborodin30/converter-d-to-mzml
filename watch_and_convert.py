@@ -28,6 +28,24 @@ from typing import Dict, Tuple, Callable
 # Regex pattern to match blank samples (e.g., "Blank-02", "Blank_1", "Blank01")
 BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
 
+
+def normalized_dataset_name(name: str) -> str:
+    """Normalize dataset dir names by trimming trailing whitespace."""
+    return name.rstrip()
+
+
+def is_dataset_dir_name(name: str) -> bool:
+    """Return True for names ending in .d, allowing trailing whitespace."""
+    return normalized_dataset_name(name).lower().endswith(".d")
+
+
+def dataset_base_name(name: str) -> str:
+    """Return dataset base name without trailing .d (robust to whitespace)."""
+    normalized = normalized_dataset_name(name)
+    if normalized.lower().endswith(".d"):
+        return normalized[:-2]
+    return normalized
+
 def is_blank_sample(name: str) -> bool:
     """Check if a folder name represents a blank sample."""
     return bool(BLANK_PATTERN.search(name))
@@ -146,11 +164,7 @@ def run_conversion(
                 pass
         return 2, ""
 
-    base_name = os.path.basename(os.path.normpath(path))
-    # strip trailing .d from directory name for output filename
-    root, ext = os.path.splitext(base_name)
-    if ext.lower() == ".d":
-        base_name = root
+    base_name = dataset_base_name(os.path.basename(os.path.normpath(path)))
     out_name = os.path.join(out_dir, base_name + ".mzML")
 
     if os.path.exists(out_name):
@@ -253,10 +267,7 @@ def run_conversion(
 
 
 def expected_output_for_dir(dirpath: str, out_dir: str) -> str:
-    base_name = os.path.basename(os.path.normpath(dirpath))
-    root, ext = os.path.splitext(base_name)
-    if ext.lower() == ".d":
-        base_name = root
+    base_name = dataset_base_name(os.path.basename(os.path.normpath(dirpath)))
     return os.path.join(out_dir, base_name + ".mzML")
 
 
@@ -278,7 +289,7 @@ def watch_directory(
     logging.info("Watching %s every %ss, stability=%s, max_workers=%d", watch_dir, poll_interval, stability_checks, max_workers)
 
     # initial snapshot: list detected .d dirs and their states (excluding blanks)
-    all_dirs = [d for d in os.listdir(watch_dir) if d.endswith(".d") and os.path.isdir(os.path.join(watch_dir, d)) and not is_blank_sample(d)]
+    all_dirs = [d for d in os.listdir(watch_dir) if is_dataset_dir_name(d) and os.path.isdir(os.path.join(watch_dir, d)) and not is_blank_sample(d)]
     pending = []
     done = []
     incomplete = []
@@ -304,7 +315,7 @@ def watch_directory(
     sizes: Dict[str, Tuple[int, int]] = {}
 
     while True:
-        all_dirs = [d for d in os.listdir(watch_dir) if d.endswith(".d") and os.path.isdir(os.path.join(watch_dir, d)) and not is_blank_sample(d)]
+        all_dirs = [d for d in os.listdir(watch_dir) if is_dataset_dir_name(d) and os.path.isdir(os.path.join(watch_dir, d)) and not is_blank_sample(d)]
         # compute queue stats: done based on VALID mzML, in-progress tracked in-memory
         done_count = 0
         for d in all_dirs:
