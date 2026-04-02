@@ -20,7 +20,7 @@ import os
 import re
 import shutil
 import subprocess
-import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Tuple, Callable
@@ -140,12 +140,26 @@ def find_tdftools() -> Tuple[str, str]:
     return ("none", "")
 
 
+def _safe_line_callback(
+    callback: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    """Call line callback while isolating callback failures."""
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        pass
+
+
 def run_conversion(
     path: str,
     out_dir: str,
     docker_image: str = "mfreitas/tdf2mzml",
     dry_run: bool = False,
     line_callback: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, str]:
     """Run conversion using Docker image `docker_image`.
 
@@ -153,15 +167,16 @@ def run_conversion(
     `tdf2mzml.py -i /data/<dir> -o /data/<basename>.mzML`.
     
     If line_callback is provided, it will be called with each stdout line.
+    If should_stop is provided and returns True, the running Docker process is
+    terminated and the function returns rc=130.
     """
     tool_type, _ = find_tdftools()
     if tool_type != "docker":
         logging.error("Docker is not available; cannot convert.")
-        if line_callback:
-            try:
-                line_callback("❌ Docker is not available. Please start Docker Desktop.")
-            except Exception:
-                pass
+        _safe_line_callback(
+            line_callback,
+            "❌ Docker is not available. Please start Docker Desktop.",
+        )
         return 2, ""
 
     base_name = dataset_base_name(os.path.basename(os.path.normpath(path)))
@@ -171,34 +186,24 @@ def run_conversion(
         # Check if existing mzML is valid
         if is_valid_mzml(out_name, validate_interval=0):
             logging.info("Skipping conversion; valid output exists: %s", out_name)
-            if line_callback:
-                try:
-                    line_callback(f"⏭️ Skipping - valid output already exists: {out_name}")
-                except Exception:
-                    pass
+            _safe_line_callback(
+                line_callback,
+                f"⏭️ Skipping - valid output already exists: {out_name}",
+            )
             return 0, out_name
         else:
             # Remove invalid/incomplete mzML to allow re-conversion
             logging.warning("Removing incomplete mzML before re-conversion: %s", out_name)
-            if line_callback:
-                try:
-                    line_callback(f"🗑️ Removing incomplete mzML: {out_name}")
-                except Exception:
-                    pass
+            _safe_line_callback(
+                line_callback,
+                f"🗑️ Removing incomplete mzML: {out_name}",
+            )
             try:
                 os.remove(out_name)
-                if line_callback:
-                    try:
-                        line_callback("   ✓ Removed successfully")
-                    except Exception:
-                        pass
+                _safe_line_callback(line_callback, "   ✓ Removed successfully")
             except OSError as e:
                 logging.error("Failed to remove incomplete mzML %s: %s", out_name, e)
-                if line_callback:
-                    try:
-                        line_callback(f"❌ Failed to remove: {e}")
-                    except Exception:
-                        pass
+                _safe_line_callback(line_callback, f"❌ Failed to remove: {e}")
                 return 3, ""
 
     if dry_run:
@@ -227,41 +232,63 @@ def run_conversion(
     logging.info("Running Docker: %s", cmd_str)
     
     # Log the command to callback
-    if line_callback:
-        try:
-            line_callback(f"🐳 Docker command: docker run --rm -v {parent}:/data {docker_image} tdf2mzml.py -i {container_path} -o {container_out}")
-        except Exception:
-            pass
+    _safe_line_callback(
+        line_callback,
+        (
+            "🐳 Docker command: docker run --rm -v "
+            f"{parent}:/data {docker_image} tdf2mzml.py -i {container_path} -o {container_out}"
+        ),
+    )
     
     # Stream output in real-time so progress can be logged
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
+        stop_triggered = False
+
+        def _watch_stop() -> None:
+            nonlocal stop_triggered
+            while proc.poll() is None:
+                if should_stop and should_stop():
+                    stop_triggered = True
+                    logging.warning("Stop requested; terminating Docker process for %s", path)
+                    _safe_line_callback(
+                        line_callback,
+                        "⏹️ Stop requested. Terminating running Docker container...",
+                    )
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    return
+                time.sleep(0.2)
+
+        stop_thread = None
+        if should_stop is not None:
+            stop_thread = threading.Thread(target=_watch_stop, daemon=True)
+            stop_thread.start()
+
         try:
             if proc.stdout:
                 for line in proc.stdout:
+                    if stop_triggered:
+                        return 130, ""
                     text = line.rstrip()
                     logging.info(text)
-                    if line_callback:
-                        try:
-                            line_callback(text)
-                        except Exception:
-                            pass
+                    _safe_line_callback(line_callback, text)
         except Exception as e:
             logging.exception("Error reading subprocess output for %s", path)
-            if line_callback:
-                try:
-                    line_callback(f"❌ Error reading Docker output: {e}")
-                except Exception:
-                    pass
+            _safe_line_callback(line_callback, f"❌ Error reading Docker output: {e}")
         rc = proc.wait()
+        if stop_thread is not None and stop_thread.is_alive():
+            stop_thread.join(timeout=0.5)
+        if stop_triggered:
+            return 130, ""
     logging.info("Docker exited with rc=%s", rc)
-    if line_callback:
-        try:
-            if rc == 0:
-                line_callback(f"✅ Docker finished successfully (exit code: {rc})")
-            else:
-                line_callback(f"❌ Docker exited with error (exit code: {rc})")
-        except Exception:
-            pass
+    if rc == 0:
+        _safe_line_callback(line_callback, f"✅ Docker finished successfully (exit code: {rc})")
+    else:
+        _safe_line_callback(line_callback, f"❌ Docker exited with error (exit code: {rc})")
     # return rc and the expected output path on the host
     return rc, out_name
 
@@ -396,18 +423,26 @@ def watch_directory(
                         full_path, rc, expected_out = future.result()
                         
                         if rc == 0:
-                            if expected_out and os.path.exists(expected_out):
+                            output_valid = (
+                                bool(expected_out)
+                                and os.path.exists(expected_out)
+                                and is_valid_mzml(expected_out, validate_interval=validate_interval)
+                            )
+                            if output_valid:
                                 logging.info("Conversion succeeded for %s; output: %s", full_path, expected_out)
                             else:
-                                logging.error("Conversion reported rc=0 but output missing for %s (expected %s)", full_path, expected_out)
+                                logging.error(
+                                    "Conversion reported rc=0 but output is missing/invalid for %s (expected %s)",
+                                    full_path,
+                                    expected_out,
+                                )
                                 # treat as failure so it can be retried
-                                known_processing.discard(full_path)
                                 sizes.pop(full_path, None)
                         else:
                             logging.error("Conversion failed (rc=%s) for %s", rc, full_path)
-                            # allow re-try later
-                            known_processing.discard(full_path)
                             sizes.pop(full_path, None)
+                        # Track only in-flight directories in memory.
+                        known_processing.discard(full_path)
                     except Exception as e:
                         logging.exception("Worker exception for %s: %s", full, e)
                         known_processing.discard(full)
@@ -424,7 +459,11 @@ def parse_args():
     p.add_argument("--out", default=None, help="Output directory for mzML files (defaults to watch dir)")
     p.add_argument("--docker-image", default="mfreitas/tdf2mzml", help="Docker image to use for tdf2mzml")
     p.add_argument("--max-workers", type=int, default=1, help="Number of parallel conversions (default: 1)")
-    p.add_argument("--log-file", default=None, help="Path to logfile (appends). If omitted, logs go to stderr")
+    p.add_argument(
+        "--log-file",
+        default=None,
+        help="Path to logfile (appends). Default: <watch_dir>/conversion.log",
+    )
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     p.add_argument("--dry-run", action="store_true", help="Don't run conversion, only report candidates")
     p.add_argument("--validate-interval", type=int, default=0, help="Seconds to wait before validating mzML output (default: 0)")

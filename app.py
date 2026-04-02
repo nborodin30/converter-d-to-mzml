@@ -11,7 +11,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import streamlit as st
 
-from watch_and_convert import run_conversion, is_valid_mzml, is_blank_sample, dir_size, has_required_files
+from watch_and_convert import (
+    dataset_base_name,
+    dir_size,
+    has_required_files,
+    is_blank_sample,
+    is_dataset_dir_name,
+    is_valid_mzml,
+    normalized_dataset_name,
+    run_conversion,
+)
 from pathlib import Path
 
 # File logging setup
@@ -19,6 +28,20 @@ from pathlib import Path
 APP_DIR = Path(__file__).parent.resolve()
 LOG_FILE = APP_DIR / "conversion.log"
 DEFAULT_DOCKER_IMAGE = "mfreitas/tdf2mzml"
+ERROR_KEYWORDS = (
+    "error",
+    "exception",
+    "failed",
+    "traceback",
+    "cannot",
+    "unable",
+    "warning",
+    "fatal",
+    "abort",
+    "invalid",
+    "denied",
+    "refused",
+)
 
 
 def log_to_file(message: str):
@@ -47,6 +70,9 @@ def _ensure_session_state_defaults() -> None:
         "statuses": dict,
         "logs": list,
         "progress": dict,
+        "errors": dict,
+        "expected_sizes": dict,
+        "output_paths": dict,
         "src_dir": lambda: os.path.abspath("."),
         "out_dir": lambda: os.path.abspath("."),
         "bg_lock": threading.Lock,
@@ -63,6 +89,8 @@ def _ensure_session_state_defaults() -> None:
             "auto_running": False,
             "in_flight_names": [],
         },
+        "blacklist_entries": list,
+        "blacklist_input": lambda: "",
     }
     for key, factory in defaults.items():
         if key not in st.session_state:
@@ -83,35 +111,75 @@ bg_queued_since = st.session_state.bg_queued_since
 bg_control = st.session_state.bg_control
 
 # Helper functions
-# Regex pattern to match blank samples (e.g., "Blank-02", "Blank_1", "Blank01")
-BLANK_PATTERN = re.compile(r"Blank[-_]?\d+", re.IGNORECASE)
+def parse_blacklist_entries(entries: list[str]) -> tuple[list[str], list[re.Pattern], list[str]]:
+    """Split blacklist entries into substrings and regex patterns.
+
+    Entry format:
+    - plain text => case-insensitive substring match
+    - re:<pattern> => regex match
+    """
+    substrings: list[str] = []
+    regexes: list[re.Pattern] = []
+    invalid: list[str] = []
+
+    for raw in entries:
+        entry = (raw or "").strip()
+        if not entry:
+            continue
+        if entry.lower().startswith("re:"):
+            pattern = entry[3:].strip()
+            if not pattern:
+                invalid.append(entry)
+                continue
+            try:
+                regexes.append(re.compile(pattern, re.IGNORECASE))
+            except re.error:
+                invalid.append(entry)
+        else:
+            substrings.append(entry.lower())
+
+    return substrings, regexes, invalid
 
 
-def normalized_dataset_name(name: str) -> str:
-    """Normalize dataset dir names by trimming trailing whitespace."""
-    return name.rstrip()
+def get_blacklist_match(name: str, entries: list[str]) -> tuple[bool, str]:
+    """Return whether dataset name matches blacklist and the matching rule."""
+    substrings, regexes, _ = parse_blacklist_entries(entries)
+    return get_blacklist_match_parsed(name, substrings, regexes)
 
 
-def is_dataset_dir_name(name: str) -> bool:
-    """Return True for names ending in .d, allowing trailing whitespace."""
-    return normalized_dataset_name(name).lower().endswith(".d")
+def get_blacklist_match_parsed(
+    name: str,
+    substrings: list[str],
+    regexes: list[re.Pattern],
+) -> tuple[bool, str]:
+    """Return whether dataset name matches pre-parsed blacklist rules."""
+    target = name.lower()
 
+    for sub in substrings:
+        if sub and sub in target:
+            return True, sub
 
-def dataset_base_name(name: str) -> str:
-    """Return dataset base name without trailing .d (robust to whitespace)."""
-    normalized = normalized_dataset_name(name)
-    if normalized.lower().endswith(".d"):
-        return normalized[:-2]
-    return normalized
+    for rx in regexes:
+        if rx.search(name):
+            return True, f"re:{rx.pattern}"
+
+    return False, ""
 
 
 @st.cache_data(ttl=1, show_spinner=False)
-def list_d_folders(path: str, exclude_blanks: bool = True) -> list[str]:
+def list_d_folders(path: str, exclude_blanks: bool = True, blacklist_entries: tuple[str, ...] = ()) -> list[str]:
     """List .d folders in path. Cached for 1 second."""
     try:
         entries = [d for d in os.listdir(path) if is_dataset_dir_name(d) and os.path.isdir(os.path.join(path, d))]
         if exclude_blanks:
             entries = [d for d in entries if not is_blank_sample(d)]
+        if blacklist_entries:
+            substrings, regexes, _ = parse_blacklist_entries(list(blacklist_entries))
+            entries = [
+                d
+                for d in entries
+                if not get_blacklist_match_parsed(d, substrings, regexes)[0]
+            ]
     except Exception:
         entries = []
     return sorted(entries)
@@ -160,7 +228,7 @@ def read_last_lines(path: Path, max_lines: int = 100, block_size: int = 8192) ->
         return []
     
 @st.cache_data(ttl=10, show_spinner=False)
-def get_mzml_status(d_folder_name: str, out_dir: str, validate_interval: int = 1) -> tuple[str, str]:
+def get_mzml_status(d_folder_name: str, out_dir: str) -> tuple[str, str]:
     """Check if mzML exists and whether it's valid. Cached for 10 seconds.
     Returns (status_code, display_text) where status_code is:
     - 'none': no mzML file
@@ -187,19 +255,18 @@ def get_mzml_status(d_folder_name: str, out_dir: str, validate_interval: int = 1
 
 
 def status_badge(status: str) -> str:
-    if status == "running":
-        return "🔄 Running"
-    elif status == "starting":
-        return "🚀 Starting"
-    elif status == "done":
-        return "✅ Done"
-    elif status == "queued":
-        return "⏳ Queued"
-    elif status == "waiting":
-        return "⏳ Checking"
-    elif status == "stopped":
-        return "⏹️ Stopped"
-    elif status.startswith("failed"):
+    fixed = {
+        "running": "🔄 Running",
+        "starting": "🚀 Starting",
+        "done": "✅ Done",
+        "queued": "⏳ Queued",
+        "waiting": "⏳ Checking",
+        "stopped": "⏹️ Stopped",
+        "blocked": "🚫 Blocked",
+    }
+    if status in fixed:
+        return fixed[status]
+    if status.startswith("failed"):
         return f"❌ {status}"
     return status
 
@@ -267,7 +334,14 @@ def wait_for_stable_size(
         last_size = current_size
         
         if stable_count < stability_checks:
-            time.sleep(check_interval)
+            waited = 0.0
+            step = 0.25
+            while waited < check_interval:
+                if stop_flag and stop_flag.get("stop"):
+                    return False
+                sleep_for = min(step, max(0.0, check_interval - waited))
+                time.sleep(sleep_for)
+                waited += sleep_for
     
     return True
 
@@ -277,6 +351,7 @@ def wait_for_stable_size(
 def convert_single_dataset(
     name: str, src: str, out: str, docker_image: str,
     stability_check_interval: int = 10, stability_checks: int = 3,
+    blacklist_entries: list[str] | None = None,
 ) -> bool:
     """Convert a single .d folder. Returns True on success."""
     # Check stop flag before starting
@@ -287,6 +362,16 @@ def convert_single_dataset(
     
     full = os.path.join(src, name)
     out_path_dir = out or src
+
+    # Safety guard: skip datasets that match blacklist rules.
+    blacklisted, matched_rule = get_blacklist_match(name, blacklist_entries or [])
+    if blacklisted:
+        with bg_lock:
+            bg_statuses[name] = "blocked"
+            msg = f"🚫 Skipped {name} (blacklist match: {matched_rule})"
+            bg_logs.append(msg)
+            log_to_file(msg)
+        return True
     
     # Wait for folder size to stabilize (ensure copy is complete)
     with bg_lock:
@@ -355,7 +440,7 @@ def convert_single_dataset(
         
         # Capture error/warning lines
         line_lower = line.lower()
-        if any(kw in line_lower for kw in ["error", "exception", "failed", "traceback", "cannot", "unable", "warning", "fatal", "abort", "invalid", "denied", "refused"]):
+        if any(kw in line_lower for kw in ERROR_KEYWORDS):
             errors.append(line)
         
         # Update progress based on output file size
@@ -371,6 +456,7 @@ def convert_single_dataset(
             out_path_dir,
             docker_image=docker_image,
             line_callback=_line_cb,
+            should_stop=lambda: bool(bg_control.get("stop")),
         )
     except Exception as e:
         rc, out_file = 99, ""
@@ -400,6 +486,7 @@ def convert_single_dataset(
                 bg_logs.append(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation (missing closing tag)")
                 log_to_file(f"   ⚠️ Debug: file exists ({file_size/(1024*1024):.1f} MB) but failed validation")
     
+    stopped = rc == 130 or bool(bg_control.get("stop"))
     ok = rc == 0 and file_exists and file_valid
 
     with bg_lock:
@@ -411,6 +498,12 @@ def convert_single_dataset(
             msg = f"✅ Completed: {name} ({final_size / (1024*1024):.1f} MB)"
             bg_logs.append(msg)
             log_to_file(msg)
+        elif stopped:
+            bg_statuses[name] = "stopped"
+            bg_errors[name] = []
+            msg = f"⏹️ Stopped: {name}"
+            bg_logs.append(msg)
+            log_to_file(msg)
         else:
             bg_statuses[name] = f"failed (rc={rc})"
             # Store all captured error lines
@@ -419,13 +512,14 @@ def convert_single_dataset(
             bg_logs.append(msg)
             log_to_file(msg)
     
-    return ok
+    return ok or stopped
 
 
 def start_conversion(
     selected: list[str], src: str, out: str, docker_image: str,
     stability_check_interval: int = 10, stability_checks: int = 3,
     max_workers: int = 2,
+    blacklist_entries: list[str] | None = None,
 ):
     """Start parallel conversion of multiple datasets."""
     bg_control["stop"] = False  # Reset stop flag
@@ -437,11 +531,12 @@ def start_conversion(
         log_to_file(msg)
     
     def orchestrator():
+        stopped_early = False
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
                     convert_single_dataset, name, src, out, docker_image,
-                    stability_check_interval, stability_checks
+                    stability_check_interval, stability_checks, blacklist_entries or []
                 ): name for name in selected
             }
             
@@ -466,6 +561,7 @@ def start_conversion(
                     # Cancel remaining futures
                     for f in futures:
                         f.cancel()
+                    stopped_early = True
                     with bg_lock:
                         msg = f"⛔ Conversion stopped. Completed: {completed}, Failed: {failed}"
                         bg_logs.append(msg)
@@ -478,7 +574,10 @@ def start_conversion(
             
             # Final summary
             with bg_lock:
-                msg = f"🏁 Conversion batch finished. Completed: {completed}, Failed: {failed}"
+                if stopped_early:
+                    msg = f"🏁 Conversion batch halted. Completed: {completed}, Failed: {failed}"
+                else:
+                    msg = f"🏁 Conversion batch finished. Completed: {completed}, Failed: {failed}"
                 bg_logs.append(msg)
                 log_to_file(msg)
     
@@ -495,6 +594,7 @@ def start_auto_conversion(
     max_workers: int = 4,
     poll_interval: int = 30,
     queue_grace_seconds: int = 2,
+    blacklist_entries: list[str] | None = None,
 ):
     """Start continuous auto-conversion similar to watch_and_convert.py behavior."""
     if bg_control.get("auto_running"):
@@ -548,6 +648,9 @@ def start_auto_conversion(
 
                     now = time.time()
                     if now >= next_scan_at and not bg_control.get("stop"):
+                        blacklist_substrings, blacklist_regexes, _ = parse_blacklist_entries(
+                            blacklist_entries or []
+                        )
                         try:
                             all_dirs = [
                                 d
@@ -567,6 +670,15 @@ def start_auto_conversion(
                             full = os.path.join(src, name)
                             base_name = dataset_base_name(name)
                             out_file = os.path.join(out or src, base_name + ".mzML")
+
+                            blocked, _ = get_blacklist_match_parsed(
+                                name, blacklist_substrings, blacklist_regexes
+                            )
+                            if blocked:
+                                with bg_lock:
+                                    if bg_statuses.get(name) not in ("done", "blocked"):
+                                        bg_statuses[name] = "blocked"
+                                continue
 
                             if not has_required_files(full, size_check_seconds=0):
                                 continue
@@ -618,6 +730,7 @@ def start_auto_conversion(
                                         docker_image,
                                         stability_check_interval,
                                         stability_checks,
+                                        blacklist_entries or [],
                                     )
                                     in_flight[future] = name
 
@@ -651,21 +764,16 @@ with bg_lock:
         st.session_state.logs.extend(bg_logs)
         bg_logs.clear()
     
-    # Store expected sizes and paths in session state for progress calculation
-    if "expected_sizes" not in st.session_state:
-        st.session_state.expected_sizes = {}
-    if "output_paths" not in st.session_state:
-        st.session_state.output_paths = {}
+    # Store expected sizes and paths in session state for progress calculation.
     for k, v in bg_expected_sizes.items():
         st.session_state.expected_sizes[k] = v
     for k, v in bg_output_paths.items():
         st.session_state.output_paths[k] = v
     
-    # Store errors in session state
-    if "errors" not in st.session_state:
-        st.session_state.errors = {}
+    # Store errors in session state.
     for k, v in bg_errors.items():
         st.session_state.errors[k] = v
+    bg_errors.clear()
 
 # Update progress for running conversions based on current file sizes (live update on each refresh)
 for name, status in st.session_state.statuses.items():
@@ -676,6 +784,24 @@ for name, status in st.session_state.statuses.items():
             current_size = get_file_size(out_path)
             pct = min(99, int((current_size / expected) * 100))
             st.session_state.progress[name] = pct
+
+# Normalize stale queue states after stop so the next batch can be selected/started.
+if bg_control.get("stop"):
+    with bg_lock:
+        for name, status in list(bg_statuses.items()):
+            if status in ("queued", "waiting", "starting"):
+                bg_statuses[name] = "stopped"
+    for name, status in list(st.session_state.statuses.items()):
+        if status in ("queued", "waiting", "starting"):
+            st.session_state.statuses[name] = "stopped"
+
+    still_active = any(
+        s in ("running", "queued", "waiting", "starting")
+        for s in st.session_state.statuses.values()
+    )
+    if not still_active and not bool(bg_control.get("auto_running")):
+        bg_control["stop"] = False
+        bg_control["auto_stop"] = False
 
 
 
@@ -774,11 +900,51 @@ with st.expander("⚙️ Settings", expanded=True):
     with settings_col2:
         max_workers = st.number_input("Parallel workers", min_value=1, max_value=8, value=1, help="Number of simultaneous conversions")
 
+    st.divider()
+    st.markdown("**Blacklist Filter (never convert these)**")
+    st.caption("Use plain text for substring match (case-insensitive), or prefix with `re:` for regex.")
+
+    add_col, btn_col = st.columns([5, 1])
+    with add_col:
+        st.session_state.blacklist_input = st.text_input(
+            "Add blacklist entry",
+            value=st.session_state.blacklist_input,
+            placeholder="Example: Blank or re:^QC_.*",
+            label_visibility="collapsed",
+        )
+    with btn_col:
+        if st.button("Add", use_container_width=True):
+            candidate = st.session_state.blacklist_input.strip()
+            if candidate:
+                if candidate not in st.session_state.blacklist_entries:
+                    st.session_state.blacklist_entries.append(candidate)
+                st.session_state.blacklist_input = ""
+                st.rerun()
+
+    _, _, invalid_blacklist = parse_blacklist_entries(st.session_state.blacklist_entries)
+    if invalid_blacklist:
+        st.warning(f"Invalid regex entries are ignored: {', '.join(invalid_blacklist)}")
+
+    if st.session_state.blacklist_entries:
+        for idx, entry in enumerate(list(st.session_state.blacklist_entries)):
+            row_col1, row_col2 = st.columns([6, 1])
+            with row_col1:
+                st.write(f"• {entry}")
+            with row_col2:
+                if st.button("Delete", key=f"del_bl_{idx}", use_container_width=True):
+                    st.session_state.blacklist_entries.pop(idx)
+                    st.rerun()
+    else:
+        st.caption("No blacklist entries configured.")
+
 
 
 # Dataset Selection
 st.markdown("### 📁 Available Datasets")
-ds = list_d_folders(st.session_state.src_dir)
+ds = list_d_folders(
+    st.session_state.src_dir,
+    blacklist_entries=tuple(st.session_state.blacklist_entries),
+)
 if not ds:
     st.warning("No `.d` folders found in the source directory.")
 else:
@@ -847,12 +1013,16 @@ else:
                     st.caption(status_badge(status))
                 with col_progress:
                     if status == "running":
-                        d_folder_path = os.path.join(st.session_state.src_dir, name)
-                        base_name = dataset_base_name(name)
-                        mzml_path = os.path.join(st.session_state.out_dir, base_name + ".mzML")
+                        expected_size = st.session_state.expected_sizes.get(name, 0)
+                        mzml_path = st.session_state.output_paths.get(name, "")
+                        if not mzml_path:
+                            base_name = dataset_base_name(name)
+                            mzml_path = os.path.join(st.session_state.out_dir, base_name + ".mzML")
+                        if expected_size <= 0:
+                            d_folder_path = os.path.join(st.session_state.src_dir, name)
+                            expected_size = dir_size(d_folder_path) * 0.87
+                            st.session_state.expected_sizes[name] = expected_size
 
-                        d_size = dir_size(d_folder_path)
-                        expected_size = d_size * 0.87
                         current_size = get_file_size(mzml_path)
 
                         if expected_size > 0:
@@ -867,6 +1037,8 @@ else:
                         st.caption("📊 Checking if copy is complete...")
                     elif status == "starting":
                         st.caption("🚀 Launching converter...")
+                    elif status == "blocked":
+                        st.caption("🚫 Excluded by blacklist")
                     elif status == "done":
                         st.progress(1.0, text="100%")
                     elif status.startswith("failed"):
@@ -887,9 +1059,9 @@ else:
 # Actions
 st.markdown("### 🚀 Actions")
 
-has_active = any(s in ("running", "queued", "waiting") for s in st.session_state.statuses.values())
+has_active = any(s in ("running", "queued", "waiting", "starting") for s in st.session_state.statuses.values())
 auto_running = bool(bg_control.get("auto_running"))
-action_col1, action_col2, action_col3, action_col4 = st.columns([1, 1, 1, 1])
+action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
 
 if auto_running:
     st.info("🤖 Auto Convert is active. New eligible .d folders will be converted automatically.")
@@ -913,6 +1085,7 @@ with action_col1:
                 st.session_state.out_dir,
                 docker_image,
                 max_workers=max_workers,
+                blacklist_entries=list(st.session_state.blacklist_entries),
             )
             st.rerun()
 
@@ -927,6 +1100,7 @@ with action_col2:
                     st.session_state.out_dir,
                     docker_image,
                     max_workers=max_workers,
+                    blacklist_entries=list(st.session_state.blacklist_entries),
                 )
                 st.toast("Auto Convert enabled", icon="🤖")
                 st.rerun()
@@ -942,26 +1116,15 @@ with action_col3:
         bg_control["stop"] = True
         # Also stop auto mode, if active.
         bg_control["auto_stop"] = True
-        st.toast("Stopping conversion after current file...", icon="⏹️")
-        st.rerun()
-
-with action_col4:
-    if st.button("🔄 Reset Status", use_container_width=True, help="Clear all conversion statuses, progress bars, error messages, and caches. Use this to start fresh or retry failed conversions."):
-        # Clear both session state and background stores
-        bg_control["stop"] = True
-        bg_control["auto_stop"] = True
-        st.session_state.statuses = {}
-        st.session_state.progress = {}
-        st.session_state.errors = {}
-        # Also clear background stores to prevent them from being copied back
+        for name, status in list(st.session_state.statuses.items()):
+            if status in ("queued", "waiting", "starting"):
+                st.session_state.statuses[name] = "stopped"
         with bg_lock:
-            bg_statuses.clear()
-            bg_progress.clear()
-            bg_errors.clear()
+            for name, status in list(bg_statuses.items()):
+                if status in ("queued", "waiting", "starting"):
+                    bg_statuses[name] = "stopped"
             bg_queued_since.clear()
-            bg_expected_sizes.clear()
-            bg_output_paths.clear()
-        st.toast("Status reset!", icon="🔄")
+        st.toast("Stopping conversion now...", icon="⏹️")
         st.rerun()
 
 

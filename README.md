@@ -7,6 +7,8 @@ Convert Bruker timsTOF `.d` folders to mzML format using Docker.
 - **Streamlit GUI** (`app.py`) - Interactive web interface for selecting and converting files
 - **CLI Watcher** (`watch_and_convert.py`) - Background watcher that auto-converts new files
 - Blank sample filtering (excludes folders matching `Blank-01`, `Blank_2`, etc.)
+- Configurable blacklist filter (substring or regex rules) to permanently exclude datasets
+- Manual batch conversion and continuous Auto Convert mode in the GUI
 - Real-time progress tracking and conversion logs
 - Validation of output mzML files
 
@@ -54,10 +56,14 @@ Features:
 - Browse and select source/output directories
 - Select multiple `.d` folders for conversion
 - Parallel conversion with configurable workers (default: 1)
+- Auto Convert mode for continuously converting newly detected datasets
 - Real-time progress bars and status updates
 - View conversion logs (GUI logs + `conversion.log` file)
 - Filter out blank samples automatically
-- Stop/reset conversion controls
+- Optional blacklist rules:
+  - plain text (case-insensitive substring match), e.g. `Blank`
+  - regex with `re:` prefix, e.g. `re:^QC_.*`
+- Stop conversion controls (including stopping Auto Convert)
 - Error details for failed conversions
 
 ## CLI Watcher Usage
@@ -91,6 +97,7 @@ python ./watch_and_convert.py --dir /path/to/watch
 - A `.d` folder is considered ready when its total size is stable for the configured number of checks and it contains `analysis.tdf` or `analysis.tdf_bin`.
 - Conversion is skipped if a valid `.mzML` already exists.
 - Expected mzML size is ~87% of the `.d` folder size.
+- Folder names with trailing spaces are handled by normalizing `.d` suffix matching/output naming.
 
 ## Installing tdf2mzml
 
